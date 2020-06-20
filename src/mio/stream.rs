@@ -106,6 +106,11 @@ impl VsockStream {
         inner.set_nonblocking(true)?;
         Ok(VsockStream { inner })
     }
+    
+    pub fn from_stream(stream: vsock::VsockStream) -> io::Result<VsockStream> {
+        stream.set_nonblocking(true)?;
+        Ok(VsockStream { inner: stream })
+    }
 
     pub fn peer_addr(&self) -> Result<SockAddr> {
         self.inner.peer_addr()
@@ -114,6 +119,7 @@ impl VsockStream {
     pub fn local_addr(&self) -> Result<SockAddr> {
         self.inner.local_addr()
     }
+    
 
     pub fn try_clone(&self) -> Result<VsockStream> {
         self.inner.try_clone().map(|s| VsockStream { inner: s })

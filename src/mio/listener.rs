@@ -37,7 +37,7 @@
  * limitations under the License.
  */
 
-use std::io::{Error, ErrorKind, Result};
+use std::io;
 use std::mem::size_of;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 
@@ -52,24 +52,24 @@ pub struct VsockListener {
 }
 
 impl VsockListener {
-    pub fn bind(addr: &SockAddr) -> Result<Self> {
+    pub fn bind(addr: &SockAddr) -> io::Result<Self> {
         let mut vsock_addr = if let SockAddr::Vsock(addr) = addr {
             addr.0
         } else {
-            return Err(Error::new(
-                ErrorKind::Other,
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
                 "requires a virtio socket address",
             ));
         };
 
         let socket = unsafe { socket(AF_VSOCK, SOCK_STREAM, 0) };
         if socket < 0 {
-            return Err(Error::last_os_error());
+            return Err(io::Error::last_os_error());
         }
 
         if unsafe { fcntl(socket, F_SETFL, O_NONBLOCK) } < 0 {
             let _ = unsafe { close(socket) };
-            return Err(Error::last_os_error());
+            return Err(io::Error::last_os_error());
         }
 
         let res = unsafe {
@@ -81,12 +81,12 @@ impl VsockListener {
         };
         if res < 0 {
             let _ = unsafe { close(socket) };
-            return Err(Error::last_os_error());
+            return Err(io::Error::last_os_error());
         }
 
         if unsafe { listen(socket, 1024) } < 0 {
             let _ = unsafe { close(socket) };
-            Err(Error::last_os_error())
+            Err(io::Error::last_os_error())
         } else {
             Ok(Self {
                 inner: unsafe { vsock::VsockListener::from_raw_fd(socket) },
@@ -94,20 +94,30 @@ impl VsockListener {
         }
     }
 
-    pub fn from_std(inner: vsock::VsockListener) -> Result<Self> {
+    pub fn from_std(inner: vsock::VsockListener) -> io::Result<Self> {
         inner.set_nonblocking(true)?;
         Ok(Self { inner })
     }
 
-    pub fn local_addr(&self) -> Result<SockAddr> {
+    pub fn local_addr(&self) -> io::Result<SockAddr> {
         self.inner.local_addr()
+    }
+    /// Returns the value of the `SO_ERROR` option.
+    pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+        self.inner.take_error()
     }
 
     /// This method is the same as `accept`, except that it returns a Virtio socket
     /// *in blocking mode* which isn't bound to `mio`. This can be later then
     /// converted to a `mio` type, if necessary.
-    pub fn accept_std(&self) -> Result<(vsock::VsockStream, SockAddr)> {
-        self.inner.accept()
+    pub fn accept_std(&self) -> io::Result<Option<(vsock::VsockStream, SockAddr)>> {
+        match self.inner.accept() {
+            Ok((socket, addr)) => Ok(Some(unsafe {
+                (vsock::VsockStream::from_raw_fd(socket.into_raw_fd()), addr)
+            })),
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -132,15 +142,15 @@ impl AsRawFd for VsockListener {
 }
 
 impl Evented for VsockListener {
-    fn register(&self, poll: &Poll, token: Token, interest: Ready, opts: PollOpt) -> Result<()> {
+    fn register(&self, poll: &Poll, token: Token, interest: Ready, opts: PollOpt) -> io::Result<()> {
         EventedFd(&self.as_raw_fd()).register(poll, token, interest, opts)
     }
 
-    fn reregister(&self, poll: &Poll, token: Token, interest: Ready, opts: PollOpt) -> Result<()> {
+    fn reregister(&self, poll: &Poll, token: Token, interest: Ready, opts: PollOpt) -> io::Result<()> {
         EventedFd(&self.as_raw_fd()).reregister(poll, token, interest, opts)
     }
 
-    fn deregister(&self, poll: &Poll) -> Result<()> {
+    fn deregister(&self, poll: &Poll) -> io::Result<()> {
         EventedFd(&self.as_raw_fd()).deregister(poll)
     }
 }

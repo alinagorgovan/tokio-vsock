@@ -19,6 +19,8 @@ extern crate iovec;
 mod listener;
 mod mio;
 mod stream;
+mod incoming;
 
-pub use listener::{Incoming, VsockListener};
-pub use stream::{ConnectFuture, VsockStream};
+pub use incoming::Incoming;
+pub use listener::VsockListener;
+pub use stream::VsockStream;

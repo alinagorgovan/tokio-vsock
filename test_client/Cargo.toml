@@ -1,0 +1,16 @@
+[package]
+name = "test_client"
+version = "0.1.0"
+authors = ["Alina Gorgovan <alina.gorgovan@stud.acs.upb.ro>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap = "2.33.0"
+futures = "0.3.5"
+hyper = "0.12.35"
+libc = "0.2.65"
+nix = "0.15.0"
+tokio = "0.2.0"
+tokio-vsock = { path = "../" }

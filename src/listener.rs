@@ -43,102 +43,101 @@
  * limitations under the License.
  */
 
-use std::io::{Error, ErrorKind, Result};
+use std::io;
 use std::os::unix::io::{AsRawFd, RawFd};
 
-use futures::{try_ready, Async, Poll, Stream};
+use mio::Ready;
+use futures::ready;
 use nix::sys::socket::SockAddr;
-use tokio::reactor::{Handle, PollEvented2};
+use futures::future::poll_fn;
+use std::task::{Context, Poll};
+
+use tokio::io::PollEvented;
 
 use crate::stream::VsockStream;
 
 /// An I/O object representing a Virtio socket listening for incoming connections.
 #[derive(Debug)]
 pub struct VsockListener {
-    io: PollEvented2<super::mio::VsockListener>,
+    io: PollEvented<super::mio::VsockListener>,
 }
 
 impl VsockListener {
-    fn new(listener: super::mio::VsockListener) -> Self {
-        let io = PollEvented2::new(listener);
-        Self { io }
+    /// Create a new Virtio socket listener associated with this event loop.
+    pub fn bind(addr: &SockAddr) -> io::Result<VsockListener> {
+        let listener = super::mio::VsockListener::bind(addr)?;
+        let io = PollEvented::new(listener)?;
+        Ok(VsockListener { io })
+    }
+    /// Returns the local socket address of this listener.
+    pub fn local_addr(&self) -> io::Result<SockAddr> {
+        self.io.get_ref().local_addr()
     }
 
-    /// Create a new Virtio socket listener associated with this event loop.
-    pub fn bind(addr: &SockAddr) -> Result<Self> {
-        let l = super::mio::VsockListener::bind(addr)?;
-        Ok(Self::new(l))
+    /// Returns the value of the `SO_ERROR` option.
+    pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+        self.io.get_ref().take_error()
+    }
+
+    /// Accepts a new incoming connection to this listener.
+    pub async fn accept(&mut self) -> io::Result<(VsockStream, SockAddr)> {
+        poll_fn(|cx| self.poll_accept(cx)).await
     }
 
     /// Attempt to accept a connection and create a new connected socket if
     /// successful.
-    pub fn poll_accept(&mut self) -> Result<Async<(VsockStream, SockAddr)>> {
-        let (io, addr) = try_ready!(self.poll_accept_std());
+    pub(crate) fn poll_accept(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<(VsockStream, SockAddr)>> {
+        let (io, addr) = ready!(self.poll_accept_std(cx))?;
 
         let io = super::mio::VsockStream::from_std(io)?;
-        let io = VsockStream::new(io);
-
-        Ok((io, addr).into())
+                
+        Ok((VsockStream::new(io)?, addr)).into()
     }
 
     /// Attempt to accept a connection and create a new connected socket if
     /// successful.
-    pub fn poll_accept_std(&mut self) -> Result<Async<(vsock::VsockStream, SockAddr)>> {
-        try_ready!(self.io.poll_read_ready(mio::Ready::readable()));
+    fn poll_accept_std(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<(vsock::VsockStream, SockAddr)>> {
+        ready!(self.io.poll_read_ready(cx, Ready::readable()))?;
 
         match self.io.get_ref().accept_std() {
-            Ok(pair) => Ok(pair.into()),
-            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                self.io.clear_read_ready(mio::Ready::readable())?;
-                Ok(Async::NotReady)
+            Ok(None) => {
+                self.io.clear_read_ready(cx, Ready::readable())?;
+                Poll::Pending
             }
-            Err(e) => Err(e),
+            Ok(Some((sock, addr))) => Ok((sock, addr)).into(),
+            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
+                self.io.clear_read_ready(cx, Ready::readable())?;
+                Poll::Pending
+            }
+            Err(err) => Err(err).into(),
         }
     }
 
     /// Create a new Virtio socket listener from a blocking listener.
-    pub fn from_std(listener: vsock::VsockListener, handle: &Handle) -> Result<Self> {
+    pub fn from_std(listener: vsock::VsockListener) -> io::Result<Self> {
         let io = super::mio::VsockListener::from_std(listener)?;
-        let io = PollEvented2::new_with_handle(io, handle)?;
+        let io = PollEvented::new(io)?;
         Ok(VsockListener { io })
     }
 
-    /// The local address that this listener is bound to.
-    pub fn local_addr(&self) -> Result<SockAddr> {
-        self.io.get_ref().local_addr()
-    }
-
-    /// Consumes this listener, returning a stream of the sockets this listener
+    // Consumes this listener, returning a stream of the sockets this listener
     /// accepts.
-    pub fn incoming(self) -> Incoming {
-        Incoming::new(self)
+    ///
+    /// This method returns an implementation of the `Stream` trait which
+    /// resolves to the sockets the are accepted on this listener.
+    pub fn incoming(&mut self) -> super::Incoming<'_> {
+        super::Incoming::new(self)
     }
 }
 
 impl AsRawFd for VsockListener {
     fn as_raw_fd(&self) -> RawFd {
         self.io.get_ref().as_raw_fd()
-    }
-}
-
-/// Stream returned by the `VsockListener::incoming` representing sockets received from a listener.
-#[derive(Debug)]
-pub struct Incoming {
-    inner: VsockListener,
-}
-
-impl Incoming {
-    fn new(listener: VsockListener) -> Incoming {
-        Incoming { inner: listener }
-    }
-}
-
-impl Stream for Incoming {
-    type Item = VsockStream;
-    type Error = Error;
-
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Error> {
-        let (socket, _) = try_ready!(self.inner.poll_accept());
-        Ok(Async::Ready(Some(socket)))
     }
 }

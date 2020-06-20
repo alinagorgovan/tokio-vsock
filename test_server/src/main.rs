@@ -15,17 +15,13 @@
  */
 
 use clap::{crate_authors, crate_version, App, Arg};
-use futures::future::{err, ok};
-use futures::{Future, Stream};
-use hyper::server::conn::Http;
-use hyper::service::service_fn_ok;
-use hyper::{Body, Request, Response};
 use nix::sys::socket::{SockAddr, VsockAddr};
-use std::io;
+use tokio::stream::StreamExt;
 use tokio_vsock::VsockListener;
 
 /// A simple Virtio socket server that uses Hyper to response to requests.
-fn main() {
+#[tokio::main]
+async fn main() {
     let matches = App::new("test_server")
         .version(crate_version!())
         .author(crate_authors!())
@@ -46,32 +42,33 @@ fn main() {
         .parse::<u32>()
         .expect("port must be a valid integer");
 
-    let listener = VsockListener::bind(&SockAddr::Vsock(VsockAddr::new(
+    let mut listener = VsockListener::bind(&SockAddr::Vsock(VsockAddr::new(
         libc::VMADDR_CID_ANY,
         listen_port,
     )))
     .expect("unable to bind virtio listener");
 
     println!("Listening for connections on port: {}", listen_port);
+    
+    let mut incoming = listener.incoming();
+    
+    while let Some(stream) = incoming.next().await {
+        match stream {
+            Ok(stream) => {
+                tokio::spawn(async move {
+                    let (mut reader, mut writer) = stream.split();
 
-    let http = Http::new();
-
-    let task = listener
-        .incoming()
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "accept connection failed"))
-        .for_each(move |stream| {
-            let peer_addr = match stream.peer_addr() {
-                Ok(peer_addr) => peer_addr,
-                Err(e) => return err(e),
-            };
-            println!("Received connection from: {:?}", peer_addr);
-            let service =
-                service_fn_ok(|_: Request<Body>| Response::new(Body::from("Hello World!")));
-            tokio::spawn(http.serve_connection(stream, service).map_err(|e| {
-                panic!("server connection error: {}", e);
-            }));
-            ok(())
-        });
-
-    tokio::run(task.map_err(|_| ()));
+                    match tokio::io::copy(&mut reader, &mut writer).await {
+                        Ok(amt) => {
+                            println!("wrote {} bytes", amt);
+                        }
+                        Err(err) => {
+                            eprintln!("IO error {:?}", err);
+                        }
+                    }
+                });
+            }
+            Err(_e) => { /* connection failed */ }
+        }
+    }
 }
